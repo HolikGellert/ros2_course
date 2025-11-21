@@ -22,6 +22,7 @@ Simulation: turtlebot3_gazebo
 ```bash
 cd ~/ros2_ws/src
 git clone https://github.com/HolikGellert/ros2_course.git
+```
 
 ### Build the package:
 
