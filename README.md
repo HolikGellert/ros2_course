@@ -1,4 +1,3 @@
-````markdown
 # ROS 2 Wall Follower with PD Control & Search
 
 ## Overview
@@ -23,7 +22,6 @@ Simulation: turtlebot3_gazebo
 ```bash
 cd ~/ros2_ws/src
 git clone https://github.com/HolikGellert/ros2_course.git
-````
 
 ### Build the package:
 
@@ -71,6 +69,3 @@ Parameters can be adjusted in wall_follower.py:
 * self.kp: Proportional gain (1.5).
 * self.kd: Derivative gain (10.0).
 * self.max_wall_dist: Threshold for switching to Search Mode (2.0m).
-
-```
-```
