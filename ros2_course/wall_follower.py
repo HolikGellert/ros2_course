@@ -9,7 +9,6 @@ class WallFollower(Node):
     def __init__(self):
         super().__init__('wall_follower')
 
-        # QoS beállítás a szimulátorhoz
         qos_profile = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
 
         self.subscription = self.create_subscription(
@@ -20,72 +19,80 @@ class WallFollower(Node):
 
         self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
 
-        # Paraméterek
-        self.target_dist = 0.50  # Cél távolság a faltól (méter)
+        # --- Konfigurációs Paraméterek ---
+        self.target_dist = 0.50
+        self.wall_lost_dist = 1.2
 
-        # Zóna határok (mikor váltunk logikát)
-        self.dist_too_close = 0.40
-        self.dist_too_far = 0.60
-        self.wall_lost_dist = 1.2  # Ha ennél messzebb a fal, akkor "elvesztettük" -> Külső sarok
+        # --- PID Paraméterek ---
+        # Csökkentettem a Kp-t, hogy ne legyen túl agresszív
+        self.kp = 1.5
 
-        self.get_logger().info('Fejlett Wall Follower elindult (Sarkok kezelésével)!')
+        # ### ÚJ ###: Kd (Derivative Gain) - A "lengéscsillapító"
+        # Ez felel azért, hogy ne lendüljön túl a robot.
+        self.kd = 10.0
+
+        # ### ÚJ ###: Előző hiba tárolása a D-tag számításához
+        self.prev_error = 0.0
+
+        self.get_logger().info('Wall Follower elindult: PD-szabályozóval!')
 
     def listener_callback(self, msg):
-        # --- 1. LIDAR Adatok Szűrése ---
-        # A "végtelen" értékeket lecseréljük 10 méterre
+        # 1. Szűrés
         ranges = [x if x != float('inf') else 10.0 for x in msg.ranges]
 
-        # Zónák definiálása (TurtleBot3 specifikus indexek)
-        # Elöl (0 fok +/- 20 fok)
+        # Irányok
         front_dist = min(ranges[0:20] + ranges[340:360])
-
-        # Bal oldalon (két zónát nézünk a precizitásért)
-        # Bal-Elöl (45 fok) - ez segít előre látni a görbületeket
         left_front_dist = min(ranges[30:60])
-        # Bal (90 fok) - ez a pontos távolság a faltól
         left_dist = min(ranges[75:105])
 
         cmd = Twist()
 
-        # --- 2. DÖNTÉSI FA (Prioritási sorrendben) ---
-
-        # A) VÉSZHELYZET / BELSŐ SAROK (Konkáv)
-        # Ha fal van előttünk, minden mást felülírunk és helyben fordulunk jobbra.
+        # --- A) VÉSZHELYZET (Front) ---
         if front_dist < 0.45:
             cmd.linear.x = 0.0
-            cmd.angular.z = -0.8  # Gyors fordulás jobbra
-            self.get_logger().info(f'BELSŐ SAROK! Fordulás jobbra. (Front: {front_dist:.2f})')
+            cmd.angular.z = -0.8
+            self.get_logger().info(f'AKADÁLY! (Front: {front_dist:.2f})')
+            # Vészhelyzetben reseteljük a D-tagot, hogy ne zavarjon be később
+            self.prev_error = 0.0
 
-        # B) KÜLSŐ SAROK (Konvex) / FAL ELVESZTÉSE
-        # Ha hirtelen eltűnt a fal balról (vagy a bal-első szenzor nem lát semmit)
-        # Akkor élesen balra kanyarodunk, hogy "utána menjünk" a falnak.
+        # --- B) KÜLSŐ SAROK ---
         elif left_dist > self.wall_lost_dist or left_front_dist > self.wall_lost_dist:
-            cmd.linear.x = 0.15   # Lassan előre
-            cmd.angular.z = 0.6   # Éles fordulás balra (ívben)
-            self.get_logger().info('KÜLSŐ SAROK! Ráfordulás balra...')
-
-        # C) KORREKCIÓ: TÚL KÖZEL
-        # Ha a falhoz túl közel sodródtunk, finoman jobbra tartunk.
-        elif left_dist < self.dist_too_close:
             cmd.linear.x = 0.15
-            cmd.angular.z = -0.3  # Finom jobbra
-            self.get_logger().info(f'Korrekció: Túl közel ({left_dist:.2f})')
+            cmd.angular.z = 0.6
+            self.get_logger().info('KÜLSŐ SAROK -> Ráfordulás balra...')
+            self.prev_error = 0.0
 
-        # D) KORREKCIÓ: TÚL TÁVOL
-        # Ha kicsit messzebb vagyunk a célnál (de még nem vesztettük el), finoman balra.
-        elif left_dist > self.dist_too_far:
-            cmd.linear.x = 0.15
-            cmd.angular.z = 0.3   # Finom balra
-            self.get_logger().info(f'Korrekció: Túl távol ({left_dist:.2f})')
-
-        # E) EGYENESEN
-        # Ha a "folyosó" közepén vagyunk a tolerancián belül.
+        # --- C) NORMÁL ÜZEM: PD-SZABÁLYOZÁS ---
         else:
-            cmd.linear.x = 0.25   # Gyorsabb haladás
-            cmd.angular.z = 0.0
-            self.get_logger().info('Egyenesen...')
+            # 1. Jelenlegi hiba számítása
+            error = self.target_dist - left_dist
 
-        # --- 3. Parancs küldése ---
+            # 2. ### ÚJ ###: D-tag számítása (Hiba változása)
+            # Mennyit változott a hiba az előző kör óta?
+            delta_error = error - self.prev_error
+
+            # 3. A PD képlet: (P_erősítés * hiba) + (D_erősítés * változás)
+            # Ha gyorsan közeledünk a falhoz, a delta_error ellentétes előjelű lesz, mint az error,
+            # így fékezi a kormányzást.
+            P_term = error * self.kp
+            D_term = delta_error * self.kd
+
+            angular_z = -1.0 * (P_term + D_term)
+
+            # Limitálás
+            cmd.angular.z = max(min(angular_z, 1.0), -1.0)
+
+            # Dinamikus sebesség (kicsit óvatosabbra véve)
+            if abs(error) < 0.1:
+                cmd.linear.x = 0.30
+            else:
+                cmd.linear.x = 0.15
+
+            # ### ÚJ ###: Jelenlegi hiba elmentése a következő körre
+            self.prev_error = error
+
+            self.get_logger().info(f'PD: Err={error:.2f}, Delta={delta_error:.3f}, Turn={cmd.angular.z:.2f}')
+
         self.publisher_.publish(cmd)
 
 def main(args=None):
