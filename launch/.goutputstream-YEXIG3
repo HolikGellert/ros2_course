@@ -1,0 +1,30 @@
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+
+def generate_launch_description():
+    # 1. Beállítjuk a robot típusát (Burger)
+    # Ez ugyanaz, mintha terminálba írnád: export TURTLEBOT3_MODEL=burger
+    set_model_env = SetEnvironmentVariable('TURTLEBOT3_MODEL', 'burger')
+
+    # 2. Megkeressük a gyári TurtleBot3 csomagot
+    pkg_turtlebot3_gazebo = get_package_share_directory('turtlebot3_gazebo')
+
+    # 3. Beállítjuk a SAJÁT világod útvonalát
+    # FIGYELEM: Ellenőrizd, hogy a fájlnév és útvonal pontos-e!
+    world_file_path = '/home/ros_user/FINAL.world'
+
+    # 4. Összerakjuk a Launch leírást
+    # Meghívjuk az 'empty_world.launch.py'-t, de átadjuk neki a 'world' paramétert
+    return LaunchDescription([
+        set_model_env,
+        
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(pkg_turtlebot3_gazebo, 'launch', 'empty_world.launch.py')
+            ),
+            launch_arguments={'world': world_file_path}.items(),
+        ),
+    ])

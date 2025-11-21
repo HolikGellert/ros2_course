@@ -1,0 +1,52 @@
+# ROS 2 Wall Follower for TurtleBot3
+
+This package implements an autonomous wall-following behavior for the TurtleBot3 robot using ROS 2 (Humble/Foxy). The robot navigates by keeping a fixed distance from the wall on its left side using LIDAR data.
+
+## 🚀 Features
+
+* **PD Controller:** Uses a Proportional-Derivative controller for smooth wall following (no oscillation/wobbling).
+* **Corner Handling:**
+    * **Concave (Inner) Corners:** Detects frontal obstacles and performs an in-place turn to avoid collision.
+    * **Convex (Outer) Corners:** Detects when the wall ends and wraps around the corner dynamically.
+* **Dynamic Speed:** Increases speed on straight paths and slows down during corrections.
+* **Robustness:** Filters invalid LIDAR data (`inf`) and uses compatible QoS settings for Gazebo.
+
+## 🛠️ Prerequisites
+
+* **OS:** Ubuntu 22.04 (Jammy) / 20.04 (Focal)
+* **ROS 2 Distro:** Humble / Foxy
+* **Packages:**
+    * `turtlebot3_gazebo`
+    * `turtlebot3_teleop` (optional)
+
+## 📦 Installation
+
+1.  **Clone the repository** into your ROS 2 workspace:
+    ```bash
+    cd ~/ros2_ws/src
+    git clone [https://github.com/YOUR_USERNAME/ros2_course.git](https://github.com/YOUR_USERNAME/ros2_course.git)
+    ```
+
+2.  **Build the package:**
+    ```bash
+    cd ~/ros2_ws
+    colcon build --symlink-install
+    ```
+
+3.  **Source the setup script:**
+    ```bash
+    source install/setup.bash
+    ```
+
+## 🏃 Usage
+
+To run the simulation and the wall follower node, you will need two terminals.
+
+### 1. Start the Simulation (Gazebo)
+In the first terminal, launch a TurtleBot3 world (e.g., a maze or empty world with walls):
+
+```bash
+export TURTLEBOT3_MODEL=burger
+ros2 launch turtlebot3_gazebo turtlebot3_world.launch.py
+# OR load your custom world:
+# ros2 launch turtlebot3_gazebo empty_world.launch.py world:=/path/to/your/maze.world
