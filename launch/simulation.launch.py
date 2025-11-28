@@ -7,17 +7,17 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    # 1. Útvonalak beállítása
-    # A te világod
-    world_file = '/home/ros_user/FINAL.world'
 
-    # A robot modellje (SDF fájl)
+    # 1. Path to the custom world file
+    pkg_share = get_package_share_directory('ros2_course')
+    world_file = os.path.join(pkg_share, 'maps', 'FINAL.world')
+
+    # 2. Path to the TurtleBot3 SDF model (for spawning)
     turtlebot3_gazebo_dir = get_package_share_directory('turtlebot3_gazebo')
     model_folder = 'turtlebot3_burger'
     urdf_path = os.path.join(turtlebot3_gazebo_dir, 'models', model_folder, 'model.sdf')
 
-    # 2. Gazebo indítása a TE világoddal
-    # Ez ugyanaz, mint a 'ros2 launch gazebo_ros gazebo.launch.py world:=...'
+    # 3. Launch Gazebo with the custom world
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(get_package_share_directory('gazebo_ros'), 'launch', 'gazebo.launch.py')
@@ -25,8 +25,7 @@ def generate_launch_description():
         launch_arguments={'world': world_file}.items(),
     )
 
-    # 3. A Robot "Spawnolása" (Létrehozása)
-    # Ez teszi be a robotot a pályára
+    # 4. Spawn the robot entity
     spawn_entity = Node(
         package='gazebo_ros',
         executable='spawn_entity.py',
@@ -40,9 +39,8 @@ def generate_launch_description():
         output='screen',
     )
 
-    # 4. Robot State Publisher (Hogy az RViz és a TF lássa a robotot)
-    # Ez fontos a falkövetőnek!
-    # Megkeressük az URDF fájlt (nem az SDF-et, hanem az URDF-et a state publishernek)
+    # 5. Robot State Publisher (Required for RViz and TF)
+    # Load the URDF file
     urdf_file_name = 'turtlebot3_burger.urdf'
     urdf_path_publisher = os.path.join(
         get_package_share_directory('turtlebot3_description'),

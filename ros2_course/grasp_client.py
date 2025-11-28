@@ -1,124 +1,94 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-
 from visualization_msgs.msg import Marker
-
+from geometry_msgs.msg import Point
 from ros2_course_msgs.action import Grasp
-
 
 class GraspClient(Node):
 
     def __init__(self):
         super().__init__('grasp_client')
 
-        # 1. Action Kliens Létrehozása
-        # Csatlakozik a 'grasp' nevű action szerverhez
+        # 1. Action Client inicializálása
         self._action_client = ActionClient(self, Grasp, 'grasp')
 
-        # 2. Marker Feliratkozás Létrehozása
-        # Figyeli a dummy markert
-        self.subscription_marker = self.create_subscription(
+        # 2. Feliratkozás a Marker-re
+        self.subscription = self.create_subscription(
             Marker,
             '/dummy_target_marker',
-            self.marker_callback, # A callback, ami elindítja az actiont
+            self.marker_callback,
             10)
 
-        # Zászló, ami megakadályozza, hogy egyszerre több célt küldjünk,
-        # ha a marker gyorsan frissülne.
-        self._is_goal_active = False
+        self.goal_handle = None
+        self.is_busy = False # Hogy ne küldjünk rá új parancsot, amíg az előző fut
 
-        self.get_logger().info('Grasp kliens elindult, várakozik a /dummy_target_marker topicra...')
+        self.get_logger().info('Grasp Client elindult. Várakozás a markerre...')
 
     def marker_callback(self, msg):
-        """
-        Ez a függvény hívódik meg, amikor egy új Marker üzenet érkezik.
-        """
-        # Ha már folyamatban van egy megfogás, ne küldjünk újat
-        if self._is_goal_active:
-            self.get_logger().warn('Már egy aktív fogási folyamat zajlik, az új marker figyelmen kívül hagyva.')
+        """Ez fut le, ha a dummy_marker publikál valamit."""
+        if self.is_busy:
+            # Opcionális: Ignorálhatjuk az új markert, ha épp dolgozunk
             return
 
-        # Zászló beállítása
-        self._is_goal_active = True
-        self.get_logger().info('Marker észlelve! Várakozás az action szerverre (/grasp)...')
+        self.get_logger().info('Marker észlelve! Action indítása...')
 
-        # 3. Várakozás a Szerverre
-        if not self._action_client.wait_for_server(timeout_sec=5.0):
-            self.get_logger().error('Action szerver nem található! A cél küldése megszakítva.')
-            self._is_goal_active = False # Zászló visszaállítása
+        # Action Server elérhetőségének ellenőrzése
+        if not self._action_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn('A Grasp szerver nem elérhető!')
             return
 
-        self.get_logger().info('Action szerver megtalálva. Cél (Goal) küldése...')
-
-        # 4. Cél (Goal) Definiálása
+        # Cél összeállítása a marker pozíciójából
         goal_msg = Grasp.Goal()
+        # A marker.pose.position egy geometry_msgs/Point, amit közvetlenül átadhatunk
+        goal_msg.grasp_pos.x = msg.pose.position.x
+        goal_msg.grasp_pos.y = msg.pose.position.y
+        goal_msg.grasp_pos.z = msg.pose.position.z
 
-        # A Grasp.action definíció (geometry_msgs/Point grasp_pos)
-        # és a Marker (msg.pose.position, ami szintén Point)
-        # közvetlenül kompatibilisek.
-        goal_msg.grasp_pos = msg.pose.position
+        self.is_busy = True
 
-        # 5. Cél Elküldése (Aszinkron)
-        # Elküldjük a célt, és megadjuk a feedback callback-et
+        # Cél küldése (aszinkron)
         self._send_goal_future = self._action_client.send_goal_async(
             goal_msg,
-            feedback_callback=self.feedback_callback)
-
-        # Hozzáadunk egy callback-et, ami akkor fut le,
-        # amikor a szerver válaszol (elfogadta/elutasította a célt)
+            feedback_callback=self.feedback_callback
+        )
         self._send_goal_future.add_done_callback(self.goal_response_callback)
 
-    def feedback_callback(self, feedback_msg):
-        """Visszajelzés (Feedback) fogadása a szervertől futás közben."""
-        feedback = feedback_msg.feedback
-        self.get_logger().info(f'Feedback érkezett: {feedback.status}')
-
     def goal_response_callback(self, future):
-        """
-        Akkor hívódik meg, amikor a szerver elfogadja vagy elutasítja a célt.
-        """
+        """Ellenőrizzük, hogy a szerver elfogadta-e a kérést."""
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error('A célt a szerver elutasította.')
-            self._is_goal_active = False # Zászló visszaállítása
+            self.get_logger().info('A célt a szerver elutasította.')
+            self.is_busy = False
             return
 
-        self.get_logger().info('Cél elfogadva a szerver által. Várakozás az eredményre...')
+        self.get_logger().info('A célt a szerver elfogadta, folyamatban...')
+        self.goal_handle = goal_handle
 
-        # Ha elfogadta, kérjük az eredményt (aszinkron módon)
+        # Várjuk az eredményt
         self._get_result_future = goal_handle.get_result_async()
-        # Hozzáadunk egy callback-et, ami az action befejeződésekor hívódik meg
         self._get_result_future.add_done_callback(self.get_result_callback)
 
+    def feedback_callback(self, feedback_msg):
+        """Visszajelzés a folyamatról (pl. "Nyitás...", "Mozgás...")"""
+        feedback = feedback_msg.feedback
+        self.get_logger().info(f'Feedback: {feedback.status}')
+
     def get_result_callback(self, future):
-        """Akkor hívódik meg, amikor az action befejeződött (Result)."""
+        """A végeredmény kezelése."""
         result = future.result().result
+        if result.success:
+            self.get_logger().info(f'SIKER! A művelet befejeződött.')
+        else:
+            self.get_logger().info(f'HIBA! A művelet sikertelen volt.')
 
-        # Kiírjuk az eredményt
-        self.get_logger().info(f'--- Eredmény')
-        self.get_logger().info(f'Sikeres: {result.success}')
-        self.get_logger().info(f'-----------------')
-
-        # A folyamat befejeződött, készen állunk egy új marker fogadására
-        self._is_goal_active = False
-
+        self.is_busy = False
 
 def main(args=None):
     rclpy.init(args=args)
-
-    grasp_client = GraspClient()
-
-    try:
-        # A spin() futtatja a node-ot, és engedi, hogy a callback-ek (pl. marker_callback)
-        # meghívódjanak, amikor üzenetek érkeznek.
-        rclpy.spin(grasp_client)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        # Tiszta leállítás
-        grasp_client.destroy_node()
-        rclpy.shutdown()
+    action_client = GraspClient()
+    rclpy.spin(action_client)
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

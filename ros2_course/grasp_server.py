@@ -4,10 +4,12 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
 
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Point
 from sensor_msgs.msg import JointState
 
+# Feltételezzük, hogy a csomag neve ros2_course_msgs és az action neve Grasp
 from ros2_course_msgs.action import Grasp
 
 class GraspServer(Node):
@@ -15,281 +17,235 @@ class GraspServer(Node):
     def __init__(self):
         super().__init__('grasp_server')
 
-        # Állapot-feliratkozások
+        # Callback group a párhuzamos futtatáshoz (fontos a blocking move függvények miatt)
+        self.cb_group = ReentrantCallbackGroup()
+
+        # Állapot változók
         self.measured_cp = None
+        self.measured_jaw = None
+
+        # 1. Robot feliratkozások (Subscribers)
         self.subscription_measured_cp = self.create_subscription(
             PoseStamped,
             '/PSM1/measured_cp',
             self.cb_measured_cp,
-            10)
+            10,
+            callback_group=self.cb_group)
 
-        self.measured_jaw = None
         self.subscription_measured_jaw = self.create_subscription(
             JointState,
             '/PSM1/jaw/measured_js',
             self.cb_measured_jaw,
-            10)
+            10,
+            callback_group=self.cb_group)
 
-        # Parancs-publisherek
+        # 2. Robot vezérlés (Publishers)
         self.servo_cp_pub = self.create_publisher(PoseStamped, '/PSM1/servo_cp', 10)
         self.jaw_pub = self.create_publisher(JointState, '/PSM1/jaw/servo_jp', 10)
 
-        # Action Server
+        # 3. Action Server inicializálás
         self._action_server = ActionServer(
             self,
             Grasp,
             'grasp',
             execute_callback=self.execute_callback,
             goal_callback=self.goal_callback,
-            cancel_callback=self.cancel_callback)
+            cancel_callback=self.cancel_callback,
+            callback_group=self.cb_group)
 
-        self.get_logger().info('Grasp action server sikeresen elindult, vár a célokra...')
+        self.get_logger().info('Grasp Action Server elindult és vár a célokra...')
 
-    # Robot Callback-ek
-
+    # --- Robot Callback-ek ---
     def cb_measured_cp(self, msg):
-        """Callback a robot mért TCP pozíciójára."""
         self.measured_cp = msg
 
     def cb_measured_jaw(self, msg):
-        """Callback a robot mért pofa-állására."""
         self.measured_jaw = msg
 
-    # Action Server Callback-ek
-
+    # --- Action Server Callback-ek ---
     def goal_callback(self, goal_request):
-        self.get_logger().info('Új cél érkezett, elfogadva.')
+        self.get_logger().info('Új cél érkezett.')
         return GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle):
-        self.get_logger().info('Cél megszakítása kérés érkezett, elfogadva.')
+        self.get_logger().info('Megszakítási kérelem érkezett.')
         return CancelResponse.ACCEPT
 
-    def execute_callback(self, goal_handle):
-        self.get_logger().info('Cél végrehajtása...')
+    async def execute_callback(self, goal_handle):
+        self.get_logger().info('Cél végrehajtása elkezdődött...')
 
-        # Feedback és Result üzenetek
         feedback_msg = Grasp.Feedback()
         result = Grasp.Result()
 
         # Mozgatási paraméterek
-        v = 0.01
-        omega = 0.1
-        dt = 0.01
+        v = 0.01      # TCP sebesség
+        omega = 0.1   # Pofa sebesség
+        dt = 0.01     # Időlépés
 
-        # 1. LÉPÉS: Gripper nyitása
-        feedback_msg.status = 'Gripper nyitása...'
-        self.get_logger().info(feedback_msg.status)
+        # --- 1. LÉPÉS: Gripper nyitása ---
+        feedback_msg.status = '1. lépés: Gripper nyitása...'
         goal_handle.publish_feedback(feedback_msg)
+        self.get_logger().info(feedback_msg.status)
 
-        # Végrehajtjuk a mozgást
         success = self.move_jaw_to(target=0.8, omega=omega, dt=dt)
-        if not success:
-            goal_handle.abort() # Ha a mozgás sikertelen (pl. node leáll), megszakítjuk
-            result.success = False
-            result.message = 'Hiba a pofa mozgatása közben (nyitás).'
-            return result
+        if not success or goal_handle.is_cancel_requested:
+            return self.handle_failure(goal_handle, result, "Hiba vagy megszakítás a nyitásnál.")
 
-        # Ellenőrizzük, hogy törölték-e a célt
-        if goal_handle.is_cancel_requested:
-            goal_handle.canceled()
-            result.success = False
-            result.message = 'Cél megszakítva a gripper nyitása közben.'
-            return result
-
-        # 2. LÉPÉS: Mozgás a célpozícióba
-        feedback_msg.status = 'Mozgás a célpozícióba...'
-        self.get_logger().info(feedback_msg.status)
+        # --- 2. LÉPÉS: Pozíció számítása és mozgás ---
+        feedback_msg.status = '2. lépés: Mozgás a célpozícióba...'
         goal_handle.publish_feedback(feedback_msg)
+        self.get_logger().info(feedback_msg.status)
 
-        # Célkoordináták kiolvasása a goal-ból
-        target_pose = goal_handle.request.target_pose
-        target_cam = np.array([target_pose.position.x,
-                               target_pose.position.y,
-                               target_pose.position.z])
+        # Célkoordináták kiolvasása (geometry_msgs/Point -> numpy)
+        # A goal definícióban: geometry_msgs/Point grasp_pos
+        pos_req = goal_handle.request.grasp_pos
+        target_cam = np.array([pos_req.x, pos_req.y, pos_req.z])
 
-        # Transzformáció (az eredeti psm_grasp.py-ból)
+        # Transzformáció (Camera -> Base)
         t_base_cam = np.array([0.18, 0.03, 0.01])
         R_base_cam = np.array([[-0.57922797, -0.27504447, -0.76736269],
                                [-0.40557979,  0.9138093,  -0.02139151],
                                [ 0.70710678,  0.29883624, -0.64085638]])
 
-        # Célpont a bázis koordináta-rendszerben + pre-grasp offset
         target_base = (R_base_cam @ target_cam) + t_base_cam
-        target_base = target_base + np.array([0.0, 0.0, 0.008]) # 8mm-rel a marker fölé
+        # Offset hozzáadása (pl. kicsit a marker fölé)
+        target_base = target_base + np.array([0.0, 0.0, 0.008])
 
-        # Mozgás a kiszámított célponthoz
         success = self.move_tcp_to(target=target_base, v=v, dt=dt)
-        if not success:
-            goal_handle.abort()
-            result.success = False
-            result.message = 'Hiba a TCP mozgatása közben.'
-            return result
+        if not success or goal_handle.is_cancel_requested:
+            return self.handle_failure(goal_handle, result, "Hiba vagy megszakítás a pozícionálásnál.")
 
-        # Ellenőrizzük, hogy törölték-e a célt
-        if goal_handle.is_cancel_requested:
-            goal_handle.canceled()
-            result.success = False
-            result.message = 'Cél megszakítva a pozícióra mozgás közben.'
-            return result
-
-        # 3. LÉPÉS: Gripper zárása
-        feedback_msg.status = 'Gripper zárása...'
-        self.get_logger().info(feedback_msg.status)
+        # --- 3. LÉPÉS: Gripper zárása (megfogás) ---
+        feedback_msg.status = '3. lépés: Gripper zárása...'
         goal_handle.publish_feedback(feedback_msg)
+        self.get_logger().info(feedback_msg.status)
 
         success = self.move_jaw_to(target=0.0, omega=omega, dt=dt)
-        if not success:
-            goal_handle.abort()
-            result.success = False
-            result.message = 'Hiba a pofa mozgatása közben (zárás).'
-            return result
+        if not success or goal_handle.is_cancel_requested:
+            return self.handle_failure(goal_handle, result, "Hiba vagy megszakítás a zárásnál.")
 
-        # 4. LÉPÉS: Befejezés
+        # --- SIKERES BEFEJEZÉS ---
         goal_handle.succeed()
         result.success = True
-        result.message = 'Megfogás sikeresen végrehajtva!'
-        self.get_logger().info(result.message)
+        # result.message = "Sikeres megfogás!" # Csak ha definiáltad a message-t az .action fájlban
+        self.get_logger().info('Action sikeresen befejeződött.')
         return result
 
-    # Mozgató segédfüggvények (a psm_grasp.py-ból átemelve és javítva)
-    # FONTOS: Ezek a függvények most már nem hívják a rclpy.spin_once()-t.
-    # Helyette a 'main' függvényben MultiThreadedExecutor-t használunk,
-    # így a háttérben futó subscriber callback-ek frissíteni tudják
-    # a self.measured_cp és self.measured_jaw változókat, miközben
-    # ezek a (blokkoló) move függvények futnak.
+    def handle_failure(self, goal_handle, result, msg):
+        """Segédfüggvény a hiba/cancel kezelésre"""
+        if goal_handle.is_cancel_requested:
+            goal_handle.canceled()
+            self.get_logger().warn('Action megszakítva.')
+        else:
+            goal_handle.abort()
+            self.get_logger().error(f'Action hiba: {msg}')
+
+        result.success = False
+        # result.message = msg
+        return result
+
+    # --- Mozgató függvények (Blocking) ---
 
     def move_tcp_to(self, target, v, dt):
-        """A robot TCP-jét a megadott célpontba mozgatja."""
-        loop_rate = self.create_rate(100, self.get_clock()) # Hz
+        rate = self.create_rate(1.0/dt)
 
-        # Várakozás, amíg megkapjuk az első pozíció adatot
+        # Várakozás az adatokra
         while self.measured_cp is None and rclpy.ok():
-            self.get_logger().info('Várakozás a /PSM1/measured_cp-re...', throttle_duration_sec=1.0)
-            loop_rate.sleep() # Hagyjuk, hogy a többi thread fusson
+            self.get_logger().info('Várakozás a pozíció adatokra...', throttle_duration_sec=2.0)
+            rate.sleep()
 
-        if not rclpy.ok():
-            return False # Node leállt
+        if not rclpy.ok(): return False
 
-        # Mozgás előkészítése
-        loop_rate = self.create_rate(1.0/dt, self.get_clock())
-        pos_curr_np = np.array([self.measured_cp.pose.position.x,
+        current_pos = np.array([self.measured_cp.pose.position.x,
                                 self.measured_cp.pose.position.y,
                                 self.measured_cp.pose.position.z])
-        pos_target_np = np.array(target)
-        distance = np.linalg.norm(pos_target_np - pos_curr_np)
+        target_np = np.array(target)
+        distance = np.linalg.norm(target_np - current_pos)
 
-        if v == 0:
-            self.get_logger().error("A TCP sebesség (v) nulla!")
-            return False
-
+        if v <= 0: return False
         T = distance / v
-        N = int(round(abs(T / dt)))
+        steps = int(T / dt)
 
-        if N == 0:
-            return True # Már ott vagyunk
+        if steps == 0: return True
 
-        tr_x = np.linspace(start=self.measured_cp.pose.position.x, stop=target[0], num=N)
-        tr_y = np.linspace(start=self.measured_cp.pose.position.y, stop=target[1], num=N)
-        tr_z = np.linspace(start=self.measured_cp.pose.position.z, stop=target[2], num=N)
+        # Interpoláció
+        traj_x = np.linspace(current_pos[0], target[0], steps)
+        traj_y = np.linspace(current_pos[1], target[1], steps)
+        traj_z = np.linspace(current_pos[2], target[2], steps)
 
-        # Sablon üzenet (orientáció és frame_id megtartásához)
-        # FONTOS: Soha ne módosítsuk a self.measured_cp-t!
-        msg_template = self.measured_cp
+        msg = PoseStamped()
+        msg.header.frame_id = self.measured_cp.header.frame_id
+        msg.pose.orientation = self.measured_cp.pose.orientation # Orientáció megtartása
 
-        for i in range(N):
-            if not rclpy.ok():
-                return False # Node leállt
+        for i in range(steps):
+            if not rclpy.ok(): return False
 
-            # Új üzenet létrehozása minden lépésben
-            msg = PoseStamped()
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = msg_template.header.frame_id
-            msg.pose.position.x = tr_x[i]
-            msg.pose.position.y = tr_y[i]
-            msg.pose.position.z = tr_z[i]
-            msg.pose.orientation = msg_template.pose.orientation
+            msg.pose.position.x = traj_x[i]
+            msg.pose.position.y = traj_y[i]
+            msg.pose.position.z = traj_z[i]
 
             self.servo_cp_pub.publish(msg)
-            loop_rate.sleep() # Várakozás a következő ciklusig
+            rate.sleep()
 
-        return True # Sikeres mozgás
+        return True
 
     def move_jaw_to(self, target, omega, dt):
-        """A robot pofáit a megadott cél-nyitottságra mozgatja."""
-        loop_rate = self.create_rate(100, self.get_clock())
+        rate = self.create_rate(1.0/dt)
 
-        # Várakozás az első pofa-pozícióra
         while self.measured_jaw is None and rclpy.ok():
-            self.get_logger().info('Várakozás a /PSM1/jaw/measured_js-re...', throttle_duration_sec=1.0)
-            loop_rate.sleep()
+            self.get_logger().info('Várakozás a pofa adatokra...', throttle_duration_sec=2.0)
+            rate.sleep()
 
-        if not rclpy.ok():
-            return False # Node leállt
+        if not rclpy.ok(): return False
 
-        loop_rate = self.create_rate(1.0/dt, self.get_clock())
-
-        # Ellenőrizzük, hogy van-e pozíció az üzenetben
-        if not self.measured_jaw.position:
-            self.get_logger().error("A mért pofa üzenet nem tartalmaz pozíciót!")
-            return False
+        if not self.measured_jaw.position: return False
 
         current_pos = self.measured_jaw.position[0]
-        distance = current_pos - target
+        distance = abs(target - current_pos)
 
-        if omega == 0:
-            self.get_logger().error("A pofa sebessége (omega) nulla!")
-            return False
+        if omega <= 0: return False
+        T = distance / omega
+        steps = int(T / dt)
 
-        T = abs(distance / omega)
-        N = int(round(abs(T / dt)))
+        if steps == 0: return True
 
-        if N == 0:
-            return True # Már ott vagyunk
+        traj = np.linspace(current_pos, target, steps)
 
-        tr_jaw = np.linspace(start = current_pos, stop = target, num = N)
+        msg = JointState()
+        msg.name = self.measured_jaw.name
 
-        # Sablon üzenet
-        msg_template = self.measured_jaw
+        for i in range(steps):
+            if not rclpy.ok(): return False
 
-        for i in range(N):
-            if not rclpy.ok():
-                return False # Node leállt
-
-            msg = JointState()
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.name = msg_template.name
-            msg.velocity = [] # A velocity/effort nem szükséges a parancshoz
-            msg.effort = []
-
-            msg.position = [tr_jaw[i]]
-
+            msg.position = [traj[i]]
             self.jaw_pub.publish(msg)
-            loop_rate.sleep()
+            rate.sleep()
 
-        return True # Sikeres mozgás
-
+        return True
 
 def main(args=None):
     rclpy.init(args=args)
+    server = GraspServer()
 
-    grasp_server = GraspServer()
-
-    grasp_server.move_tcp_to([0.0, 0.0, -0.12], 0.01, 0.01)
-    grasp_server.move_jaw_to(0.0, 0.1, 0.01)
-    grasp_server.get_logger().info('Robot resetelve. A szerver készen áll.')
+    # --- EZT A RÉSZT KOMMENTELD KI VAGY TÖRÖLD ---
+    # A probléma forrása: blokkolja a futást a spin előtt,
+    # így nem érkeznek meg a szenzoradatok.
+    # server.move_tcp_to([0.0, 0.0, -0.12], 0.05, 0.01)
+    # server.move_jaw_to(0.0, 0.1, 0.01)
+    # server.get_logger().info('Robot resetelve...')
+    # ---------------------------------------------
 
     executor = MultiThreadedExecutor()
 
+    # A spin indítja el ténylegesen a kommunikációt
     try:
-        rclpy.spin(grasp_server, executor=executor)
+        rclpy.spin(server, executor=executor)
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        grasp_server.get_logger().error(f"Hiba történt a spin közben: {e}")
     finally:
-        grasp_server.get_logger().info('Action server leállítása...')
-        grasp_server.destroy_node()
+        server.destroy_node()
         rclpy.shutdown()
 
 if __name__ == '__main__':
