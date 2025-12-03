@@ -27,10 +27,11 @@ Before using this package, you must install the Gazebo simulator and the TurtleB
    sudo apt install ros-humble-gazebo-ros-pkgs
    ```
 
-2. **Install TurtleBot3 Simulation Packages:**
+2. **Install TurtleBot3 Packages:**
 
    ```bash
    sudo apt install ros-humble-turtlebot3-gazebo ros-humble-turtlebot3-simulations
+   sudo apt install ros-humble-turtlebot3-gazebo ros-humble-turtlebot3-teleop
    ```
 
 3. **Set the Robot Model:**
